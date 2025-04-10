@@ -8,7 +8,7 @@ on:
       repositories:
         description: '要同步的仓库列表 (格式: owner/repo, 多个用逗号分隔)'
         required: true
-        default: 'AlistGo/alist'
+        default: 'AlistGo/alist,Xmarmalade/alisthelper'
 
 jobs:
   sync-releases:
