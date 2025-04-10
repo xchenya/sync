@@ -8,7 +8,7 @@ on:
       repositories:
         description: '要同步的仓库列表 (格式: owner/repo, 多个用逗号分隔)'
         required: true
-        default: 'AlistGo/alist,AlistGo/alist-web,MHSanaei/3x-ui,XTLS/Xray-core,immortalwrt/immortalwrt,openwrt/openwrt'
+        default: 'AlistGo/alist'
 
 jobs:
   sync-releases:
@@ -28,7 +28,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y curl jq git
-          
+
           if ! command -v gh &>/dev/null; then
             curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
             sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
@@ -59,15 +59,11 @@ jobs:
           get_tag() {
             local upstream="$1"
             local tag=""
-
-            echo "🔍 获取 $upstream 的最新 Release..."
-            tag=$(gh api repos/$upstream/releases 2>/dev/null | jq -r '[.[] | select(.prerelease == false)][0].tag_name' 2>/dev/null || echo "")
+            tag=$(gh api repos/$upstream/releases 2>/dev/null | jq -r '[.[] | select(.prerelease == false)][0].tag_name' 2>/dev/null)
             if [[ -z "$tag" || "$tag" == "null" ]]; then
-              echo "⚠️ Release 无结果，尝试获取 Tag"
-              tag=$(gh api repos/$upstream/tags 2>/dev/null | jq -r '.[0].name' 2>/dev/null || echo "")
+              tag=$(gh api repos/$upstream/tags 2>/dev/null | jq -r '.[0].name' 2>/dev/null)
             fi
             if [[ -z "$tag" || "$tag" == "null" ]]; then
-              echo "❌ $upstream 无法获取有效 tag，跳过"
               return 1
             fi
             echo "$tag"
@@ -79,7 +75,7 @@ jobs:
             repo=$(cut -d/ -f2 <<< "$upstream")
             history_file="sync-history/${owner}_${repo}.txt"
 
-            tag=$(get_tag "$upstream") || continue
+            tag=$(get_tag "$upstream") || { echo "❌ 获取 tag 失败，跳过 $upstream"; continue; }
             echo "✅ 获取到 tag: $tag"
 
             last_synced=$(cat "$history_file" 2>/dev/null || echo "init")
