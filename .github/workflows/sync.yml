@@ -1,0 +1,120 @@
+name: Sync Upstream Releases
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      repositories:
+        description: '要同步的仓库列表 (格式: owner/repo, 多个用逗号分隔)'
+        required: true
+        default: 'AlistGo/alist,Xmarmalade/alisthelper'
+
+jobs:
+  sync-releases:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git jq zip
+          sudo apt-get install -y gh || true
+
+      - name: Determine repositories
+        id: set-repos
+        run: |
+          if [ -n "${{ github.event.inputs.repositories }}" ]; then
+            REPOS="${{ github.event.inputs.repositories }}"
+          elif [ -n "${{ vars.UPSTREAM_REPOSITORIES }}" ]; then
+            REPOS="${{ vars.UPSTREAM_REPOSITORIES }}"
+          else
+            REPOS="AlistGo/alist"
+          fi
+          echo "REPOSITORIES=${REPOS}" >> $GITHUB_OUTPUT
+
+      - name: Process repositories
+        run: |
+          set -euo pipefail
+          mkdir -p sync-history
+          history_file="sync-history/history.json"
+          [ -f "$history_file" ] || echo "{}" > "$history_file"
+
+          mapfile -t repos <<< <(echo "${{ steps.set-repos.outputs.REPOSITORIES }}" | tr ',' '\n')
+
+          for upstream in "${repos[@]}"; do
+            echo "🔍 正在处理: $upstream"
+            owner=$(cut -d/ -f1 <<< "$upstream")
+            repo_name=$(cut -d/ -f2 <<< "$upstream")
+
+            # 获取最新正式 Release tag，如果没有则获取 Tag
+            tag=$(gh api repos/$upstream/releases --jq '[.[] | select(.prerelease == false)][0].tag_name' || echo "")
+            if [[ -z "$tag" || "$tag" == "null" ]]; then
+              echo "⚠️ 未找到正式 Release，尝试获取 Tag"
+              tag=$(gh api repos/$upstream/tags --jq '.[0].name' || echo "")
+            fi
+            if [[ -z "$tag" || "$tag" == "null" ]]; then
+              echo "❌ $upstream 无法获取 tag，跳过"
+              continue
+            fi
+
+            # 比对历史记录
+            last_tag=$(jq -r --arg repo "$upstream" '.[$repo] // empty' "$history_file")
+            if [[ "$last_tag" == "$tag" ]]; then
+              echo "⏭️ $upstream 的 tag [$tag] 已同步，跳过"
+              continue
+            fi
+
+            # 下载源码 zip
+            zip_name="${repo_name}-${tag}.zip"
+            zip_url="https://github.com/${upstream}/archive/refs/tags/${tag}.zip"
+
+            echo "⬇️ 下载: $zip_url"
+            if ! wget -q -O "$zip_name" "$zip_url"; then
+              echo "⚠️ 下载失败，使用 git 克隆生成 zip"
+              git clone --depth 1 --branch "$tag" "https://github.com/$upstream.git" "${repo_name}-${tag}-src"
+              pushd "${repo_name}-${tag}-src" >/dev/null
+              zip -qr "../$zip_name" .
+              popd >/dev/null
+              rm -rf "${repo_name}-${tag}-src"
+            fi
+
+            md5sum=$(md5sum "$zip_name" | awk '{print $1}')
+            timestamp=$(date -u +'%Y-%m-%d-%H%M')
+            sync_tag="release-${timestamp}"
+
+            echo "🚀 创建 Release: $sync_tag"
+            gh release create "$sync_tag" "$zip_name" \
+              --title "$timestamp: ${repo_name} (${tag})" \
+              --notes "MD5: $md5sum\nRepo: $upstream\nSource Tag: $tag"
+
+            echo "✅ 同步完成: $upstream @ $tag"
+
+            # 更新记录
+            tmp_file=$(mktemp)
+            jq --arg repo "$upstream" --arg tag "$tag" '.[$repo] = $tag' "$history_file" > "$tmp_file"
+            mv "$tmp_file" "$history_file"
+            rm -f "$zip_name"
+          done
+
+      - name: Commit sync history
+        run: |
+          if [[ -n "$(git status --porcelain sync-history)" ]]; then
+            git config user.name "GitHub Actions"
+            git config user.email "actions@github.com"
+            git add sync-history
+            git commit -m "Update sync history records"
+            git push
+            echo "📤 同步记录已提交"
+          else
+            echo "✅ 没有变化，无需提交"
+          fi
